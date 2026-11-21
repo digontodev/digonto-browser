@@ -805,7 +805,7 @@ class FindBar(QWidget):
 
 # -------------------------------------------------------------------------------------------- main window --
 class Main(QMainWindow):
-    def __init__(self, private=False, restore=False):
+    def __init__(self, private=False, restore=False, start=None):
         super().__init__()
         self.private = private
         self.profile = get_profile(private)
@@ -931,6 +931,8 @@ class Main(QMainWindow):
                 self.add_tab(u, background=True)
             if tabs:
                 self.tabs.setCurrentIndex(min(int(sess.get("current", 0)), len(tabs) - 1))
+        for u in start or []:
+            self.add_tab(u)
         if self.tabs.count() == 0:
             self.add_tab(urls.NEWTAB)
         self.update_title()
@@ -1595,9 +1597,7 @@ def main():
     global SETTINGS, BOOKMARKS, HISTORY, ZOOM
     SETTINGS, BOOKMARKS, HISTORY, ZOOM = store.Settings(), store.Bookmarks(), store.History(), store.Zoom()
     DOWNLOAD_LISTENERS.append(lambda req: WINDOWS and WINDOWS[-1].show_downloads(req))
-    w = Main(restore=not args)
-    for a in args:
-        w.add_tab(_target(a))
+    w = Main(restore=not args, start=[_target(a) for a in args])
     w.show()
 
     def _open(a):
