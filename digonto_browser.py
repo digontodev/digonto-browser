@@ -273,13 +273,47 @@ def get_profile(private):
         a = getattr(QWebEngineSettings.WebAttribute, attr, None)
         if a is not None:
             s.setAttribute(a, True)
-    handler = pages.Handler(SETTINGS, HISTORY, private, prof)
+    handler = pages.Handler(SETTINGS, HISTORY, private, prof,
+                            {"changed": settings_changed, "pick": pick_download_dir, "clear": clear_browsing_data,
+                             "default_dir": default_download_dir})
     prof.installUrlSchemeHandler(pages.SCHEME, handler)
     prof._handler = handler
     apply_cookie_policy(prof)
     prof.downloadRequested.connect(on_download)
     PROFILES[key] = prof
     return prof
+
+
+def settings_changed(key=None):
+    for w in list(WINDOWS):
+        try:
+            w.fill_bbar()
+            w.refresh_bar()
+        except RuntimeError:
+            pass
+    for prof in PROFILES.values():
+        apply_cookie_policy(prof)
+
+
+def pick_download_dir(_q):
+    d = QFileDialog.getExistingDirectory(QApplication.activeWindow(), "Downloads folder", default_download_dir())
+    if d:
+        SETTINGS["download_dir"] = d
+        return {"folder": d}
+    return {}
+
+
+def clear_browsing_data(q):
+    secs = int(q.get("since", "0") or 0)
+    prof = get_profile(False)
+    if q.get("hist") == "1":
+        HISTORY.clear(time.time() - secs if secs else 0)
+        prof.clearAllVisitedLinks()
+    if q.get("cookies") == "1":
+        prof.cookieStore().deleteAllCookies()
+    if q.get("cache") == "1":
+        prof.clearHttpCache()
+    return {}
 
 
 def apply_cookie_policy(prof):
@@ -1037,7 +1071,7 @@ class Main(QMainWindow):
         elif page.audible:
             ic = nav_icon("sound", PINK)
         elif ic.isNull():
-            ic = ui.app_icon(HERE, SLUG) if v.url().toString().startswith(urls.NEWTAB) else QIcon()
+            ic = ui.app_icon(HERE, SLUG) if v.url().toString().startswith("digonto:") else QIcon()
         self.tabs.setTabIcon(i, ic)
         if page is self.current():
             self.update_title()
@@ -1343,18 +1377,19 @@ class Main(QMainWindow):
                         "Free and open source (AGPL-3.0). No account, no tracking by Digonto.",
                         ui.app_icon(HERE, SLUG))
 
-    def open_settings(self):
-        SettingsDialog(self).exec()
-        for w in list(WINDOWS):
-            try:
-                w.fill_bbar()
-            except RuntimeError:
-                pass
-        for prof in PROFILES.values():
-            apply_cookie_policy(prof)
+    def open_settings(self, part=""):
+        """Settings is a page in a tab (digonto://settings), like in Chrome; reuse it if it is already open"""
+        target = "digonto://settings" + (f"#{part}" if part else "")
+        for i in range(self.tabs.count()):
+            if self.page_at(i).view.url().toString().startswith("digonto://settings"):
+                self.tabs.setCurrentIndex(i)
+                if part:
+                    self.page_at(i).view.setUrl(QUrl(target))
+                return
+        self.add_tab(target, after_current=True)
 
     def clear_data(self):
-        ClearDialog(self).exec()
+        self.open_settings("privacy")
 
     def shortcuts(self):
         def sc(keys, fn):
@@ -1416,113 +1451,6 @@ class Main(QMainWindow):
         if self in WINDOWS:
             WINDOWS.remove(self)
         super().closeEvent(e)
-
-
-class SettingsDialog(QDialog):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setWindowTitle("Settings")
-        self.setMinimumWidth(520)
-        f = QFormLayout(self)
-        f.setSpacing(10)
-        self.engine = combo()
-        for k, (name, _) in urls.ENGINES.items():
-            self.engine.addItem(name, k)
-        self.engine.setCurrentIndex(max(0, self.engine.findData(SETTINGS["engine"])))
-        f.addRow("Search engine", self.engine)
-        self.startup = combo()
-        self.startup.addItem("Open the tabs from last time", "restore")
-        self.startup.addItem("Open a new tab", "newtab")
-        self.startup.setCurrentIndex(max(0, self.startup.findData(SETTINGS["startup"])))
-        f.addRow("On start", self.startup)
-        row = QHBoxLayout()
-        self.folder = QLineEdit(default_download_dir())
-        pick = QPushButton("Choose …")
-        pick.clicked.connect(self.pick)
-        row.addWidget(self.folder, 1)
-        row.addWidget(pick)
-        f.addRow("Downloads folder", row)
-        self.ask = QCheckBox("Ask where to save each download")
-        self.ask.setChecked(bool(SETTINGS["ask_download"]))
-        f.addRow("", self.ask)
-        self.cookies = QCheckBox("Block third-party cookies (stops most cross-site tracking)")
-        self.cookies.setChecked(bool(SETTINGS["block_third_party_cookies"]))
-        f.addRow("Privacy", self.cookies)
-        self.bbar = QCheckBox("Show the bookmarks bar")
-        self.bbar.setChecked(bool(SETTINGS["show_bookmarks_bar"]))
-        f.addRow("Look", self.bbar)
-        self.zoom = combo()
-        for z in (0.75, 0.9, 1.0, 1.1, 1.25, 1.5):
-            self.zoom.addItem(f"{round(z * 100)} %", z)
-        self.zoom.setCurrentIndex(max(0, self.zoom.findData(SETTINGS["default_zoom"])))
-        f.addRow("Page zoom", self.zoom)
-        clear = QPushButton("Clear browsing data …")
-        clear.clicked.connect(lambda: ClearDialog(self).exec())
-        f.addRow("", clear)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.save)
-        bb.rejected.connect(self.reject)
-        f.addRow(bb)
-
-    def pick(self):
-        d = QFileDialog.getExistingDirectory(self, "Downloads folder", self.folder.text())
-        if d:
-            self.folder.setText(d)
-
-    def save(self):
-        SETTINGS["engine"] = self.engine.currentData()
-        SETTINGS["startup"] = self.startup.currentData()
-        SETTINGS["download_dir"] = self.folder.text().strip()
-        SETTINGS["ask_download"] = self.ask.isChecked()
-        SETTINGS["block_third_party_cookies"] = self.cookies.isChecked()
-        SETTINGS["show_bookmarks_bar"] = self.bbar.isChecked()
-        SETTINGS["default_zoom"] = self.zoom.currentData()
-        self.accept()
-
-
-class ClearDialog(QDialog):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setWindowTitle("Clear browsing data")
-        v = QVBoxLayout(self)
-        self.when = combo()
-        for label, secs in (("Last hour", 3600), ("Last 24 hours", 86400), ("Last 7 days", 7 * 86400),
-                            ("Last 4 weeks", 28 * 86400), ("All time", 0)):
-            self.when.addItem(label, secs)
-        self.when.setCurrentIndex(4)
-        h = QHBoxLayout()
-        h.addWidget(QLabel("Time range"))
-        h.addWidget(self.when, 1)
-        v.addLayout(h)
-        self.c_hist = QCheckBox("Browsing history")
-        self.c_cookies = QCheckBox("Cookies and site data (signs you out of most sites)")
-        self.c_cache = QCheckBox("Cached pictures and files")
-        for c in (self.c_hist, self.c_cache):
-            c.setChecked(True)
-        for c in (self.c_hist, self.c_cookies, self.c_cache):
-            v.addWidget(c)
-        note = QLabel("Cookies and cache are always cleared for all time.")
-        note.setStyleSheet(f"color:{SUB}; font-size:11px;")
-        v.addWidget(note)
-        bb = QDialogButtonBox()
-        go = bb.addButton("Clear data", QDialogButtonBox.AcceptRole)
-        go.setObjectName("primary")
-        bb.addButton(QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.go)
-        bb.rejected.connect(self.reject)
-        v.addWidget(bb)
-
-    def go(self):
-        secs = self.when.currentData()
-        prof = get_profile(False)
-        if self.c_hist.isChecked():
-            HISTORY.clear(time.time() - secs if secs else 0)
-            prof.clearAllVisitedLinks()
-        if self.c_cookies.isChecked():
-            prof.cookieStore().deleteAllCookies()
-        if self.c_cache.isChecked():
-            prof.clearHttpCache()
-        self.accept()
 
 
 # ---------------------------------------------------------------------------------------- single instance --
