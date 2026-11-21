@@ -56,9 +56,9 @@ jobs:
           N="${{ github.event.repository.name }}"
           for f in dist/*; do
             case "$f" in
-              *.exe) cp "$f" "dist/$N-windows.exe" ;;
-              *.dmg) cp "$f" "dist/$N-macos.dmg" ;;
-              *.deb) cp "$f" "dist/$N-linux.deb" ;;
+              *.exe) mv "$f" "dist/$N-windows.exe" ;;
+              *.dmg) mv "$f" "dist/$N-macos.dmg" ;;
+              *.deb) mv "$f" "dist/$N-linux.deb" ;;
             esac
           done
           ls -la dist
