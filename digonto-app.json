@@ -1,8 +1,8 @@
 {
   "slug": "digonto-browser",
   "name": "Digonto Browser",
-  "version": "0.1.0",
-  "comment": "Web browser on Chromium with tabs, bookmarks, private windows and (soon) Chrome extensions",
+  "version": "0.2.0",
+  "comment": "Web browser on Chromium with tabs, bookmarks, private windows and Chrome extensions and a built-in ad blocker",
   "entry": "digonto_browser.py",
   "files": [
     "digonto_browser.py",

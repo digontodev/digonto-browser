@@ -22,11 +22,22 @@ Get the newest version from the **[Releases page](https://github.com/digontodev/
 - Asks before a site may use your camera, microphone, location or notifications
 - Third-party cookies blocked by default; DuckDuckGo search by default (Startpage, Brave, Ecosia, Google, Bing, Qwant in Settings)
 
+## Digonto Ad Blocker (built in)
+
+On by default: blocks ads and trackers (EasyList + EasyPrivacy, about 52,000 rules, updated weekly) and hides empty ad boxes.
+The shield in the top bar shows how many things were blocked on the page and turns blocking off for one site;
+the **Extensions** page switches it off completely. Works in private windows too.
+
+## Chrome extensions
+
+The **Extensions** page (🧩 in the top bar) installs Manifest V3 extensions from a Chrome Web Store link, a `.crx` / `.zip` file
+or a folder; on the Chrome Web Store an "Add to Digonto Browser" bar appears above the page. After installing, Digonto
+shows whether the extension works. Their buttons and pop-ups go in the top bar. Chrome extensions don't run in private windows.
+
 ## Coming next
 
-1. Chrome extensions (Manifest V3) from the Chrome Web Store, a `.zip` or a folder
-2. Ad and tracker blocking, saved passwords in the system keychain, importing bookmarks from Chrome / Firefox, default browser
-3. Inside Digonto Studio
+1. Saved passwords in the system keychain, importing bookmarks from Chrome / Firefox, default browser
+2. Inside Digonto Studio
 
 Not possible: videos with copy protection (Netflix, Disney+, Prime Video). They need Google's Widevine module, which the free Chromium engine does not have.
 

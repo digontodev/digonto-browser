@@ -11,7 +11,7 @@ from PySide6.QtCore import QEvent, QObject, QPoint, QSize, QStandardPaths, Qt, Q
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap, QShortcut,
                            QStandardItem, QStandardItemModel)
 from PySide6.QtWebEngineCore import (QWebEngineDownloadRequest, QWebEnginePage, QWebEnginePermission, QWebEngineProfile,
-                                     QWebEngineSettings)
+                                     QWebEngineScript, QWebEngineSettings)
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QCompleter, QDialog, QDialogButtonBox, QFileDialog,
                                QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QCompleter, Q
 
 import digonto_ui as ui
 from browserkit import __version__ as VERSION
-from browserkit import pages, store, urls
+from browserkit import adblock, extensions, pages, store, urls
 
 APP_NAME = "Digonto Browser"
 SLUG = "digonto-browser"
@@ -80,6 +80,9 @@ PERMISSION_TEXT = {
 
 # one store for every normal window; private windows only read the settings
 SETTINGS = BOOKMARKS = HISTORY = ZOOM = None
+BLOCKER = None                    # Digonto Ad Blocker (adblock.Blocker)
+EXTS = None                       # Chrome extensions of the normal profile (extensions.Extensions)
+INTERCEPTORS = []
 PROFILES = {}
 DOWNLOADS = []                    # QWebEngineDownloadRequest objects of this run
 DOWNLOAD_LISTENERS = []
@@ -179,6 +182,33 @@ def nav_icon(kind, color=INK, size=18):
         p.setPen(QPen(QColor(color), 1.5, Qt.SolidLine, Qt.RoundCap))
         p.drawLine(int(s * .32), int(s * .32), int(s * .68), int(s * .68))
         p.drawLine(int(s * .68), int(s * .32), int(s * .32), int(s * .68))
+    elif kind in ("shield", "shield_off"):
+        path = QPainterPath()
+        path.moveTo(s * .5, s * .12); path.lineTo(s * .82, s * .25); path.cubicTo(s * .82, s * .6, s * .68, s * .8, s * .5, s * .9)
+        path.cubicTo(s * .32, s * .8, s * .18, s * .6, s * .18, s * .25); path.closeSubpath()
+        if kind == "shield":
+            from PySide6.QtGui import QLinearGradient
+            g = QLinearGradient(0, 0, s, s)
+            g.setColorAt(0, QColor(PINK))
+            g.setColorAt(1, QColor(AMBER))
+            p.setBrush(g)
+            p.setPen(Qt.NoPen)
+            p.drawPath(path)
+            p.setPen(QPen(QColor("white"), 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            ck = QPainterPath()
+            ck.moveTo(s * .36, s * .5); ck.lineTo(s * .47, s * .61); ck.lineTo(s * .66, s * .4)
+            p.drawPath(ck)
+        else:
+            p.drawPath(path)
+            p.drawLine(int(s * .2), int(s * .2), int(s * .8), int(s * .82))
+    elif kind == "puzzle":
+        path = QPainterPath()
+        path.moveTo(s * .2, s * .32); path.lineTo(s * .4, s * .32)
+        path.arcTo(s * .4, s * .18, s * .16, s * .16, 200, -220)
+        path.lineTo(s * .74, s * .32); path.lineTo(s * .74, s * .5)
+        path.arcTo(s * .7, s * .5, s * .16, s * .16, 110, -220)
+        path.lineTo(s * .74, s * .84); path.lineTo(s * .2, s * .84); path.closeSubpath()
+        p.drawPath(path)
     elif kind == "plus":
         p.drawLine(s // 2, int(s * .25), s // 2, int(s * .75))
         p.drawLine(int(s * .25), s // 2, int(s * .75), s // 2)
@@ -275,13 +305,158 @@ def get_profile(private):
             s.setAttribute(a, True)
     handler = pages.Handler(SETTINGS, HISTORY, private, prof,
                             {"changed": settings_changed, "pick": pick_download_dir, "clear": clear_browsing_data,
-                             "default_dir": default_download_dir})
+                             "default_dir": default_download_dir, "ext_info": extensions_info,
+                             "extensions/adblock": ext_adblock, "extensions/update": ext_update,
+                             "extensions/unpause": ext_unpause, "extensions/install": ext_install,
+                             "extensions/file": ext_file, "extensions/folder": ext_folder,
+                             "extensions/toggle": ext_toggle, "extensions/remove": ext_remove,
+                             "extensions/retry": ext_retry})
+    ic = adblock.Interceptor(BLOCKER)
+    prof.setUrlRequestInterceptor(ic)
+    INTERCEPTORS.append(ic)
+    prof._adblock_script = None
     prof.installUrlSchemeHandler(pages.SCHEME, handler)
     prof._handler = handler
     apply_cookie_policy(prof)
     prof.downloadRequested.connect(on_download)
     PROFILES[key] = prof
+    apply_adblock_css(prof)
     return prof
+
+
+def apply_adblock_css(prof):
+    """generic element hiding: one style sheet put into every page (not on paused sites, not when switched off)"""
+    sc = prof.scripts()
+    old = getattr(prof, "_adblock_script", None)
+    if old is not None:
+        sc.remove(old)
+        prof._adblock_script = None
+    if not BLOCKER.enabled:
+        return
+    allow = json.dumps(sorted(SETTINGS.get("adblock_allow", []) or []))
+    css = json.dumps(BLOCKER.css())
+    js = f"""(function(){{
+  var allow = {allow}, h = location.hostname.toLowerCase();
+  for (var i = 0; i < allow.length; i++) {{ if (h === allow[i] || h.endsWith('.' + allow[i])) return; }}
+  if (!/^https?:$/.test(location.protocol)) return;
+  var st = document.createElement('style'); st.id = 'digonto-adblock'; st.textContent = {css};
+  (document.head || document.documentElement).appendChild(st);
+}})();"""
+    script = QWebEngineScript()
+    script.setName("digonto-adblock")
+    script.setSourceCode(js)
+    script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
+    script.setWorldId(QWebEngineScript.ScriptWorldId.ApplicationWorld)
+    script.setRunsOnSubFrames(False)
+    sc.insert(script)
+    prof._adblock_script = script
+
+
+def adblock_changed():
+    for prof in PROFILES.values():
+        apply_adblock_css(prof)
+    for w in list(WINDOWS):
+        try:
+            w.update_shield()
+        except RuntimeError:
+            pass
+
+
+# ---- the Extensions page (digonto://extensions) talks to these
+def extensions_info():
+    up = BLOCKER.last_update()
+    recs = [dict(r) for r in extensions.RECOMMENDED]
+    tested = set(SETTINGS.get("tested_extensions", []) or [])
+    for r in recs:
+        r["tested"] = r["id"] in tested
+    return {"adblock": {"enabled": BLOCKER.enabled, "total": BLOCKER.total, "rules": BLOCKER.engine.count_rules,
+                        "updated": time.strftime("%d %B %Y", time.localtime(up)) if up else "",
+                        "allow": sorted(SETTINGS.get("adblock_allow", []) or [])},
+            "exts": EXTS.items() if EXTS else [], "recommended": recs, "broken": bool(EXTS and EXTS.broken),
+            "available": EXTS is not None}
+
+
+def ext_adblock(q):
+    BLOCKER.set_enabled(q.get("on") == "1")
+    adblock_changed()
+
+
+def ext_update(q):
+    BLOCKER.update_lists(force=True)
+
+
+def ext_unpause(q):
+    allow = set(SETTINGS.get("adblock_allow", []) or [])
+    allow.discard(q.get("site", ""))
+    SETTINGS["adblock_allow"] = sorted(allow)
+    adblock_changed()
+
+
+def ext_install(q):
+    if not EXTS:
+        return {"msg": "Extensions are not available in this window"}
+    link = q.get("link", "")
+    if os.path.exists(link):
+        EXTS.install_path(link)
+        return {"msg": "Installing …"}
+    if not extensions.webstore_id(link):
+        return {"msg": "That is not a Chrome Web Store link (it should contain /detail/…)"}
+    EXTS.install_webstore(link, q.get("name", ""))
+    return {"msg": "Downloading from the Chrome Web Store …"}
+
+
+def ext_file(q):
+    path, _ = QFileDialog.getOpenFileName(QApplication.activeWindow(), "Install an extension", os.path.expanduser("~"),
+                                          "Chrome extension (*.crx *.zip)")
+    if path and EXTS:
+        EXTS.install_path(path)
+        return {"msg": "Installing …"}
+    return {}
+
+
+def ext_folder(q):
+    d = QFileDialog.getExistingDirectory(QApplication.activeWindow(), "Folder with the extension (manifest.json)")
+    if d and EXTS:
+        EXTS.install_path(d)
+        return {"msg": "Installing …"}
+    return {}
+
+
+def ext_toggle(q):
+    if EXTS:
+        EXTS.set_enabled(q.get("id", ""), q.get("on") == "1")
+
+
+def ext_retry(q):
+    if EXTS:
+        EXTS.retry()
+
+
+def ext_remove(q):
+    if EXTS:
+        EXTS.remove(q.get("id", ""))
+
+
+def extensions_changed():
+    """reload open Extensions tabs and rebuild the extension buttons in the top bar"""
+    for w in list(WINDOWS):
+        try:
+            w.fill_ext_buttons()
+            for i in range(w.tabs.count()):
+                v = w.page_at(i).view
+                if v.url().toString().startswith("digonto://extensions"):
+                    v.reload()
+        except RuntimeError:
+            pass
+
+
+def notify(text):
+    for w in list(WINDOWS):
+        try:
+            if w.isActiveWindow() or len(WINDOWS) == 1:
+                w.toast(text)
+        except RuntimeError:
+            pass
 
 
 def settings_changed(key=None):
@@ -861,10 +1036,12 @@ class Main(QMainWindow):
              None,
              ("bookmarks", "pages", "Bookmarks (Ctrl+Shift+O)", lambda: self.toggle_panel("bookmarks")),
              ("history", "playlist", "History (Ctrl+H)", lambda: self.toggle_panel("history")),
-             ("downloads", "export", "Downloads (Ctrl+J)", lambda: self.toggle_panel("downloads"))],
+             ("downloads", "export", "Downloads (Ctrl+J)", lambda: self.toggle_panel("downloads")),
+             None,
+             ("extensions", "wand", "Extensions", lambda: self.open_page("extensions"))],
             [("settings", "settings", "Settings", self.open_settings)])
         for key, kind in (("newtab", "tab"), ("private", "mask"), ("bookmarks", "star"), ("history", "clock"),
-                          ("downloads", "download")):
+                          ("downloads", "download"), ("extensions", "puzzle")):
             b = self.rail.buttons.get(key)
             if b is not None:
                 b.setIcon(nav_icon(kind, INK, 22))
@@ -931,6 +1108,19 @@ class Main(QMainWindow):
         self.b_zoom.clicked.connect(lambda: self.set_zoom(1.0))
         self.b_zoom.hide()
         th.addWidget(self.b_zoom)
+        self.b_shield = QToolButton()
+        self.b_shield.setObjectName("nav")
+        self.b_shield.setIconSize(QSize(18, 18))
+        self.b_shield.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.b_shield.setCursor(Qt.PointingHandCursor)
+        self.b_shield.setStyleSheet(f"QToolButton{{font-size:11px; font-weight:600; color:{'#EDE6F4' if private else SUB};}}")
+        self.b_shield.clicked.connect(self.shield_menu)
+        th.addWidget(self.b_shield)
+        self.ext_box = QHBoxLayout()
+        self.ext_box.setSpacing(2)
+        th.addLayout(self.ext_box)
+        self.b_ext = nav_button("puzzle", "Extensions", lambda: self.open_page("extensions"), c)
+        th.addWidget(self.b_ext)
         self.b_menu = nav_button("menu", "Menu", None, c)
         self.b_menu.setPopupMode(QToolButton.InstantPopup)
         self.b_menu.setMenu(self.build_menu())
@@ -955,6 +1145,12 @@ class Main(QMainWindow):
         col.addWidget(self.find)
         outer.addLayout(col, 1)
         self.setCentralWidget(root)
+        self._toast = QLabel(self)
+        self._toast.setStyleSheet(f"background:{INK}; color:white; border-radius:14px; padding:7px 16px; font-size:13px;")
+        self._toast.hide()
+        self._toast_timer = QTimer(self, singleShot=True, interval=3200, timeout=self._toast.hide)
+        self.fill_ext_buttons()
+        self.update_shield()
         self.shortcuts()
         WINDOWS.append(self)
 
@@ -1129,6 +1325,7 @@ class Main(QMainWindow):
     def url_changed(self, page, u):
         if page is self.current():
             self.refresh_bar()
+        self.webstore_bar(page, u)
         z = ZOOM.get(u.host(), SETTINGS["default_zoom"]) if not self.private else SETTINGS["default_zoom"]
         if abs(page.view.zoomFactor() - z) > 0.001:
             page.view.setZoomFactor(z)
@@ -1136,6 +1333,8 @@ class Main(QMainWindow):
                 self.show_zoom()
 
     def load_state(self, page, loading):
+        if loading and not getattr(page, "loading", False):
+            BLOCKER.reset_count(page.view.url().host())
         page.loading = loading
         if page is self.current():
             self.b_reload.setIcon(nav_icon("stop" if loading else "reload", "#EDE6F4" if self.private else INK))
@@ -1159,6 +1358,7 @@ class Main(QMainWindow):
         self.b_fwd.setEnabled(v.history().canGoForward())
         self.load_state(self.current(), getattr(self.current(), "loading", False))
         self.show_zoom()
+        self.update_shield()
 
     def update_title(self):
         v = self.view()
@@ -1367,6 +1567,7 @@ class Main(QMainWindow):
         more.addAction("Developer tools\tF12", self.dev_tools)
         more.addAction("Clear browsing data …", self.clear_data)
         m.addSeparator()
+        m.addAction("Extensions", lambda: self.open_page("extensions"))
         m.addAction("Settings", self.open_settings)
         m.addAction(f"About {APP_NAME}", self.about)
         return m
@@ -1377,16 +1578,145 @@ class Main(QMainWindow):
                         "Free and open source (AGPL-3.0). No account, no tracking by Digonto.",
                         ui.app_icon(HERE, SLUG))
 
-    def open_settings(self, part=""):
-        """Settings is a page in a tab (digonto://settings), like in Chrome; reuse it if it is already open"""
-        target = "digonto://settings" + (f"#{part}" if part else "")
+    def open_page(self, name, part=""):
+        """Settings / Extensions are pages in a tab (digonto://...), like in Chrome; reuse the tab if it is open"""
+        base = f"digonto://{name}"
+        target = base + (f"#{part}" if part else "")
         for i in range(self.tabs.count()):
-            if self.page_at(i).view.url().toString().startswith("digonto://settings"):
+            if self.page_at(i).view.url().toString().startswith(base):
                 self.tabs.setCurrentIndex(i)
-                if part:
-                    self.page_at(i).view.setUrl(QUrl(target))
+                self.page_at(i).view.setUrl(QUrl(target)) if part else self.page_at(i).view.reload()
                 return
-        self.add_tab(target, after_current=True)
+        v = self.view()
+        if v and v.url().toString().startswith(urls.NEWTAB):
+            v.setUrl(QUrl(target))
+        else:
+            self.add_tab(target, after_current=True)
+
+    def open_settings(self, part=""):
+        self.open_page("settings", part)
+
+    # ---- ad blocker shield, extension buttons, notices
+    def update_shield(self):
+        v = self.view()
+        host = v.url().host() if v else ""
+        web = bool(v) and v.url().scheme() in ("http", "https")
+        on = BLOCKER.enabled and not (host and BLOCKER.paused_on(host))
+        n = BLOCKER.counts.get(host, 0) if web else 0
+        self.b_shield.setIcon(nav_icon("shield" if on else "shield_off", SUB))
+        self.b_shield.setText(str(n) if on and n else "")
+        if not BLOCKER.enabled:
+            tip = "Digonto Ad Blocker is switched off"
+        elif not on:
+            tip = f"Ad blocker is off on {adblock.site_of(host)}"
+        else:
+            tip = f"Digonto Ad Blocker: {n} ads and trackers blocked on this page"
+        self.b_shield.setToolTip(tip)
+
+    def shield_menu(self):
+        v = self.view()
+        host = v.url().host() if v else ""
+        web = bool(v) and v.url().scheme() in ("http", "https")
+        m = QMenu(self)
+        n = BLOCKER.counts.get(host, 0) if web else 0
+        head = m.addAction(f"Digonto Ad Blocker  ·  {n} blocked on this page" if BLOCKER.enabled else "Digonto Ad Blocker is off")
+        head.setEnabled(False)
+        m.addSeparator()
+        if BLOCKER.enabled and web and host:
+            site = adblock.site_of(host)
+            if BLOCKER.paused_on(host):
+                m.addAction(f"Turn blocking on for {site}", lambda: self.pause_site(host, False))
+            else:
+                m.addAction(f"Turn blocking off for {site}", lambda: self.pause_site(host, True))
+        m.addAction("Turn the ad blocker off everywhere" if BLOCKER.enabled else "Turn the ad blocker on",
+                    lambda: (BLOCKER.set_enabled(not BLOCKER.enabled), adblock_changed(), self.view() and self.view().reload()))
+        m.addSeparator()
+        m.addAction("Extensions …", lambda: self.open_page("extensions"))
+        m.exec(self.b_shield.mapToGlobal(QPoint(0, self.b_shield.height())))
+
+    def pause_site(self, host, paused):
+        BLOCKER.set_paused(host, paused)
+        adblock_changed()
+        v = self.view()
+        if v:
+            v.reload()
+
+    def fill_ext_buttons(self):
+        while self.ext_box.count():
+            it = self.ext_box.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        if self.private or not EXTS:
+            self.b_ext.setVisible(not self.private)
+            return
+        from PySide6.QtCore import QByteArray
+        for e in EXTS.items():
+            if not (e["enabled"] and e["loaded"]):
+                continue
+            b = QToolButton()
+            b.setObjectName("nav")
+            b.setIconSize(QSize(18, 18))
+            b.setToolTip(e["name"])
+            b.setCursor(Qt.PointingHandCursor)
+            if e["icon"].startswith("data:"):
+                pm = QPixmap()
+                pm.loadFromData(QByteArray.fromBase64(e["icon"].split(",", 1)[1].encode()))
+                b.setIcon(QIcon(pm))
+            else:
+                b.setIcon(nav_icon("puzzle", SUB))
+            if e["popup"]:
+                b.clicked.connect(lambda _=False, url=e["popup"], w=b: self.ext_popup(url, w))
+            else:
+                b.clicked.connect(lambda: self.open_page("extensions"))
+            self.ext_box.addWidget(b)
+
+    def ext_popup(self, url, anchor):
+        """an extension's pop-up, under its button in the top bar (like Chrome)"""
+        pop = QWidget(self, Qt.Popup)
+        pop.setAttribute(Qt.WA_DeleteOnClose)
+        lay = QVBoxLayout(pop)
+        lay.setContentsMargins(1, 1, 1, 1)
+        v = QWebEngineView(pop)
+        v.setPage(QWebEnginePage(self.profile, v))
+        lay.addWidget(v)
+        pop.setStyleSheet(f"QWidget{{background:white; border:1px solid {LINE};}}")
+        pop.resize(380, 480)
+
+        def fit(sz):
+            w = max(220, min(800, int(sz.width()) + 2))
+            h = max(120, min(600, int(sz.height()) + 2))
+            pop.resize(w, h)
+            place()
+
+        def place():
+            g = anchor.mapToGlobal(QPoint(anchor.width(), anchor.height() + 4))
+            pop.move(g.x() - pop.width(), g.y())
+        v.page().contentsSizeChanged.connect(fit)
+        v.page().windowCloseRequested.connect(pop.close)
+        v.setUrl(QUrl(url))
+        place()
+        pop.show()
+
+    def toast(self, text):
+        self._toast.setText(text)
+        self._toast.adjustSize()
+        self._toast.move((self.width() - self._toast.width()) // 2, self.height() - self._toast.height() - 28)
+        self._toast.show()
+        self._toast.raise_()
+        self._toast_timer.start()
+
+    def webstore_bar(self, page, u):
+        """on a Chrome Web Store extension page: offer 'Add to Digonto Browser'"""
+        ext_id = extensions.webstore_id(u.toString())
+        if not ext_id or self.private or getattr(page, "_ws_offered", None) == ext_id:
+            return
+        page._ws_offered = ext_id
+        if any(e["id"] == ext_id for e in (EXTS.items() if EXTS else [])):
+            return
+        page.add_bar("Want this extension? Digonto Browser can install extensions from the Chrome Web Store.",
+                     [("Not now", lambda: None, False),
+                      ("Add to Digonto Browser", lambda: EXTS.install_webstore(u.toString(), page.view.title().split(" - ")[0]), True)],
+                     "puzzle")
 
     def clear_data(self):
         self.open_settings("privacy")
@@ -1443,6 +1773,7 @@ class Main(QMainWindow):
                 if u and not u.startswith(urls.NEWTAB):
                     tabs.append(u)
             store.save_session({"tabs": tabs, "current": max(0, self.tabs.currentIndex()), "time": time.time()})
+        BLOCKER.save_total()
         for w in self.popups + self.dev_windows:
             try:
                 w.close()
@@ -1467,6 +1798,36 @@ def _forward(args):
     s.waitForReadyRead(1500)
     s.disconnectFromServer()
     return bool(ok)
+
+
+def setup_extras():
+    """the ad blocker and Chrome extensions (call after SETTINGS exists)"""
+    global BLOCKER, EXTS
+    BLOCKER = adblock.Blocker(SETTINGS)
+
+    def counted(host):
+        for w in list(WINDOWS):
+            try:
+                v = w.view()
+                if v and v.url().host() == host:
+                    w.update_shield()
+            except RuntimeError:
+                pass
+    BLOCKER.counted.connect(counted)
+    BLOCKER.reloaded.connect(adblock_changed)
+    QTimer.singleShot(20000, lambda: BLOCKER.update_lists())          # weekly list update, a bit after start
+    prof = get_profile(False)
+    try:
+        from PySide6.QtWebEngineCore import qWebEngineChromiumVersion
+        ver = qWebEngineChromiumVersion()
+    except ImportError:
+        ver = "140.0.0.0"
+    try:
+        EXTS = extensions.Extensions(prof, ver, SETTINGS)
+        EXTS.changed.connect(extensions_changed)
+        EXTS.message.connect(notify)
+    except AttributeError:                       # Qt older than 6.10: no extensions
+        EXTS = None
 
 
 _SERVERS = []
@@ -1524,6 +1885,7 @@ def main():
     no_app_filters(app)
     global SETTINGS, BOOKMARKS, HISTORY, ZOOM
     SETTINGS, BOOKMARKS, HISTORY, ZOOM = store.Settings(), store.Bookmarks(), store.History(), store.Zoom()
+    setup_extras()
     DOWNLOAD_LISTENERS.append(lambda req: WINDOWS and WINDOWS[-1].show_downloads(req))
     w = Main(restore=not args, start=[_target(a) for a in args])
     w.show()

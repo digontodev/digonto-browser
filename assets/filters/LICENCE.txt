@@ -1,0 +1,11 @@
+Filter lists used by the Digonto Ad Blocker
+===========================================
+
+These files come from EasyList and EasyPrivacy, by The EasyList authors (https://easylist.to/).
+
+EasyList and EasyPrivacy are dual licensed under the GNU General Public License version 3 (or later)
+and Creative Commons Attribution-ShareAlike 3.0 Unported (or later). Digonto Browser uses them under
+the GNU GPL v3 (or later). Source: https://github.com/easylist/easylist
+
+Digonto Browser keeps these copies as a starting point and downloads the newest lists every week
+into the user's own data folder.

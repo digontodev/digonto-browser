@@ -228,6 +228,107 @@ document.getElementById('clear').onclick = () => call('clear', {{
 </script></body></html>"""
 
 
+def extensions_html(info):
+    """info: {"adblock": {"enabled","total","rules","updated","allow"}, "exts": [...], "recommended": [...]}"""
+    ab = info["adblock"]
+    on = " checked" if ab["enabled"] else ""
+    upd = ab["updated"] or "the version that came with Digonto Browser"
+    allow = "".join(f'<div class="row"><div class="t">{html.escape(a)}</div><button data-unpause="{html.escape(a)}">Block again</button></div>'
+                    for a in ab["allow"]) or '<div class="row"><div class="d">None. The shield in the top bar turns blocking off for one site.</div></div>'
+
+    def ext_card(e):
+        ic = (f'<img class="ic" src="{e["icon"]}">' if e["icon"] else '<div class="ic">🧩</div>')
+        if e["error"] or not e["loaded"]:
+            status = f'<span class="bad">Does not work: {html.escape(e["error"] or "did not load")}</span>'
+        elif e["enabled"]:
+            status = '<span class="ok">Works</span>'
+        else:
+            status = '<span class="off">Switched off</span>'
+        tog = (f'<label class="switch"><input type="checkbox" data-toggle="{e["id"]}"{" checked" if e["enabled"] else ""}><span></span></label>'
+               if e["loaded"] else "")
+        return (f'<div class="card">{ic}<div class="body"><h3>{html.escape(e["name"])} <span class="ver">{html.escape(e["version"])}</span></h3>'
+                f'<div class="d">{html.escape(e["description"] or "")}</div><div class="st">{status}'
+                f' · <a href="#" data-remove="{e["id"]}">Remove</a></div></div>{tog}</div>')
+    installed_ids = {e["id"] for e in info["exts"]}
+    exts = "".join(ext_card(e) for e in info["exts"]) or '<div class="row"><div class="d">No Chrome extensions yet.</div></div>'
+
+    def rec(r):
+        btn = ('<span class="ok">Installed</span>' if r["id"] in installed_ids else
+               f'<button data-rec="{r["id"]}" data-name="{html.escape(r["name"])}">Install</button>')
+        tested = ' <span class="badge">tested</span>' if r.get("tested") else ""
+        return f'<div class="row"><div><div class="t">{html.escape(r["name"])}{tested}</div><div class="d">{html.escape(r["what"])}</div></div>{btn}</div>'
+    recs = "".join(rec(r) for r in info["recommended"])
+    note = ('<div class="note">Chrome extensions do not run in private windows (the engine does not allow it). '
+            'The Digonto Ad Blocker works everywhere.</div>')
+    if info.get("broken"):
+        note = '<div class="warn">Switching a Chrome extension on made the browser close the last time. This is a bug in the Qt web engine on this computer, so Digonto stopped switching extensions on. Installed extensions stay in the list. <button id="retry">Try again</button></div>' + note
+    if not info.get("available", True):
+        note = '<div class="warn">This version of the web engine has no extension support (Qt 6.10 or newer is needed).</div>'
+    return f"""<!doctype html><html><head><meta charset="utf-8"><title>Extensions</title><style>{SETTINGS_CSS}
+.card{{display:flex;gap:16px;align-items:flex-start;padding:16px 0;border-top:1px solid var(--line)}} .card:first-child{{border-top:0}}
+.ic{{width:44px;height:44px;border-radius:11px;flex:none;display:flex;align-items:center;justify-content:center;object-fit:contain;
+     background:linear-gradient(135deg,#5A2A86,var(--pink));color:#fff;font-size:22px}}
+img.ic{{background:transparent}}
+.card .body{{flex:1;min-width:0}} .card h3{{margin:0 0 3px;font-size:15px}} .ver{{font-size:11px;color:var(--sub);font-weight:400}}
+.badge{{font-size:11px;padding:2px 8px;border-radius:10px;background:#EDE6F4;color:#5A2A86;margin-left:6px;font-weight:600}}
+.stat{{font-size:22px;font-weight:700}} .stats{{display:flex;gap:28px;margin-top:10px}}
+.st{{font-size:12px;margin-top:6px}} .ok{{color:#15803D;font-weight:600}} .bad{{color:#B91C1C}} .off{{color:var(--sub)}}
+.st a{{color:var(--sub)}}
+.install{{display:flex;gap:8px;padding:14px 0 6px}} .install input{{flex:1;min-width:0}}
+.btns{{display:flex;gap:8px;flex-wrap:wrap;padding:6px 0 14px}}
+.note{{font-size:12px;color:var(--sub);margin:-8px 4px 18px}}
+.warn{{background:#FFF4E5;border:1px solid #F3D9B1;color:#7C4A03;border-radius:12px;padding:12px 14px;margin:0 0 18px;font-size:13px}}
+.warn button{{margin-left:8px}}
+</style></head><body><div class="wrap">
+<header><img src="{_logo_uri()}" alt=""><h1>Extensions <span>· Digonto Browser</span></h1></header>
+
+<h2>Digonto extensions</h2><section>
+<div class="card"><div class="ic">🛡</div><div class="body">
+<h3>Digonto Ad Blocker <span class="badge">built in</span></h3>
+<div class="d">Blocks ads and trackers and hides empty ad boxes. Filter lists: EasyList and EasyPrivacy (by the EasyList authors).</div>
+<div class="stats"><div><div class="stat">{ab["total"]:,}</div><div class="d">ads and trackers blocked</div></div>
+<div><div class="stat">{ab["rules"]:,}</div><div class="d">filter rules</div></div></div>
+</div><label class="switch"><input type="checkbox" id="ab"{on}><span></span></label></div>
+<div class="row"><div><div class="t">Filter lists</div><div class="d">Last updated: {html.escape(upd)}. They update by themselves every week.</div></div>
+<button id="upd">Update now</button></div>
+<div class="row" style="display:block"><div class="t">Sites where blocking is off</div></div>{allow}
+</section>
+
+<h2>Add a Chrome extension</h2><section>
+<div class="install"><input type="text" id="link" placeholder="Paste a Chrome Web Store link, e.g. https://chromewebstore.google.com/detail/…">
+<button class="primary" id="add">Install</button></div>
+<div class="btns"><button id="store">Open the Chrome Web Store</button><button id="file">Install from a .crx / .zip file …</button>
+<button id="folder">Install from a folder …</button></div>
+<div class="d" style="padding-bottom:14px">Tip: on the Chrome Web Store, open an extension and press <b>Add to Digonto Browser</b> in the bar above the page.
+Only Manifest V3 extensions work. After installing, Digonto tells you if the extension works.</div>
+</section>
+
+<h2>Your Chrome extensions</h2><section>{exts}</section>{note}
+
+<h2>Popular extensions to try</h2><section>{recs}</section>
+</div><div class="saved" id="saved">Saved</div>
+<script>
+const toast = (t, ms) => {{ const s = document.getElementById('saved'); s.textContent = t || 'Saved'; s.classList.add('on');
+  clearTimeout(window._t); window._t = setTimeout(() => s.classList.remove('on'), ms || 1800); }};
+const call = (path, args) => fetch('digonto://extensions/' + path + '?' + new URLSearchParams(args || {{}})).then(r => r.json());
+document.getElementById('ab').onchange = e => call('adblock', {{on: e.target.checked ? 1 : 0}}).then(() => toast(e.target.checked ? 'Ad blocker on' : 'Ad blocker off'));
+document.getElementById('upd').onclick = () => call('update').then(() => toast('Updating the filter lists in the background …'));
+document.querySelectorAll('[data-unpause]').forEach(b => b.onclick = () => call('unpause', {{site: b.dataset.unpause}}).then(() => location.reload()));
+document.getElementById('add').onclick = () => {{ const v = document.getElementById('link').value.trim(); if (!v) return;
+  call('install', {{link: v}}).then(r => toast(r.msg || 'Installing …', 4000)); }};
+document.getElementById('link').addEventListener('keydown', e => {{ if (e.key === 'Enter') document.getElementById('add').click(); }});
+document.getElementById('store').onclick = () => location.href = 'https://chromewebstore.google.com/';
+document.getElementById('file').onclick = () => call('file').then(r => r.msg && toast(r.msg, 4000));
+document.getElementById('folder').onclick = () => call('folder').then(r => r.msg && toast(r.msg, 4000));
+document.querySelectorAll('[data-rec]').forEach(b => b.onclick = () => {{ b.disabled = true; b.textContent = 'Installing …';
+  call('install', {{link: b.dataset.rec, name: b.dataset.name}}).then(r => toast(r.msg || 'Installing …', 4000)); }});
+document.querySelectorAll('[data-toggle]').forEach(c => c.onchange = () => call('toggle', {{id: c.dataset.toggle, on: c.checked ? 1 : 0}}).then(() => location.reload()));
+const rt = document.getElementById('retry'); if (rt) rt.onclick = () => call('retry').then(() => location.reload());
+document.querySelectorAll('[data-remove]').forEach(a => a.onclick = e => {{ e.preventDefault();
+  if (confirm('Remove this extension?')) call('remove', {{id: a.dataset.remove}}); }});
+</script></body></html>"""
+
+
 TYPES = {"engine": str, "startup": str, "default_zoom": float, "ask_download": bool, "block_third_party_cookies": bool,
          "show_bookmarks_bar": bool}
 
@@ -254,9 +355,13 @@ class Handler(QWebEngineUrlSchemeHandler):
         elif host == "settings" and not path:
             dd = self.actions["default_dir"]() if "default_dir" in self.actions else ""
             self._reply(job, settings_html(self.settings, dd).encode("utf-8"))
-        elif host == "settings" and path in ("set", "pick", "clear"):
-            initiator = job.initiator().toString() if hasattr(job, "initiator") else "digonto://settings"
-            if not initiator.startswith("digonto://settings"):     # only the settings page itself may change settings
+        elif host == "extensions" and not path:
+            info = self.actions["ext_info"]() if "ext_info" in self.actions else {
+                "adblock": {"enabled": False, "total": 0, "rules": 0, "updated": "", "allow": []}, "exts": [], "recommended": []}
+            self._reply(job, extensions_html(info).encode("utf-8"))
+        elif (host == "settings" and path in ("set", "pick", "clear")) or (host == "extensions" and path in ("adblock", "update", "unpause", "install", "file", "folder", "toggle", "remove", "retry")):
+            initiator = job.initiator().toString() if hasattr(job, "initiator") else f"digonto://{host}"
+            if not initiator.startswith(f"digonto://{host}"):     # only the page itself may change its settings
                 job.fail(QWebEngineUrlRequestJob.Error.RequestDenied)
                 return
             q = dict(parse_qsl(url.query()))
@@ -266,9 +371,9 @@ class Handler(QWebEngineUrlSchemeHandler):
                 self.settings[k] = (q.get("v") == "1") if t is bool else t(q.get("v", ""))
                 if "changed" in self.actions:
                     self.actions["changed"](k)
-            elif path in self.actions:                          # may open a dialog: answer after the event loop is free
+            elif (host + "/" + path) in self.actions or path in self.actions:   # may open a dialog: answer later
                 from PySide6.QtCore import QTimer
-                fn = self.actions[path]
+                fn = self.actions.get(host + "/" + path) or self.actions[path]
 
                 def later(job=job, q=q, fn=fn):
                     res = {"ok": True}
