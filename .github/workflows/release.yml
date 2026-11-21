@@ -1,0 +1,99 @@
+# Builds the standalone installers of this program on GitHub's own computers and puts them on the Releases page.
+#   Linux  .deb  (Ubuntu / Debian, 64-bit)
+#   macOS  .dmg  (Intel build; also runs on Apple silicon)
+#   Windows .exe (installer, 64-bit)
+# Start it: on the Actions page press \"Run workflow\" and tick \"Publish\" (or push a tag like v1.2.3).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Put the installers on the Releases page (version from digonto-app.json)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04      # the Qt libraries need Ubuntu 24.04 / Debian 13 or newer
+          - os: windows-latest
+          - os: macos-15-intel    # all Macs: runs natively on Intel, through Rosetta 2 on Apple silicon
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: src/digonto-browser
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Libraries (exact versions, SHA-256 checked)
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          REQ=src/digonto-browser/requirements.txt
+          if [ "$RUNNER_OS" = "macOS" ] && [ "$RUNNER_ARCH" = "X64" ] && [ -f src/digonto-browser/requirements-macos-intel.txt ]; then REQ=src/digonto-browser/requirements-macos-intel.txt; fi
+          python -m pip install --require-hashes -r "$REQ"
+          python -m pip install pyinstaller==6.22.3
+      - name: Inno Setup (Windows installer maker)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and -not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - name: Build
+        shell: bash
+        run: python src/digonto-browser/packaging/build.py --root src --apps digonto-browser --out dist
+      - name: Fixed-name copy (stable download link for digonto.dev)
+        shell: bash
+        run: |
+          N="${{ github.event.repository.name }}"
+          for f in dist/*; do
+            case "$f" in
+              *.exe) cp "$f" "dist/$N-windows.exe" ;;
+              *.dmg) cp "$f" "dist/$N-macos.dmg" ;;
+              *.deb) cp "$f" "dist/$N-linux.deb" ;;
+            esac
+          done
+          ls -la dist
+      - uses: actions/upload-artifact@v5
+        with:
+          name: digonto-browser-${{ matrix.os }}
+          path: dist/*
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Version
+        id: v
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else echo "tag=v$(python3 -c 'import json;print(json.load(open("digonto-app.json"))["version"])')" >> "$GITHUB_OUTPUT"; fi
+          echo "name=$(python3 -c 'import json;print(json.load(open("digonto-app.json"))["name"])')" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Put the installers on the Releases page
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          name: ${{ steps.v.outputs.name }} ${{ steps.v.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          body: |
+            Offline installers - no account, no internet needed.
+            - Windows 10/11: the `.exe` setup
+            - macOS 13 or newer (Intel and Apple silicon): the `.dmg`
+              First start: System Settings > Privacy & Security > Open Anyway (not signed by Apple yet).
+            - Ubuntu 24.04+ / Debian 13+: the `.deb`
+          files: dist/*

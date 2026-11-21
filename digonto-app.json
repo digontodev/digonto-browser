@@ -1,0 +1,46 @@
+{
+  "slug": "digonto-browser",
+  "name": "Digonto Browser",
+  "version": "0.1.0",
+  "comment": "Web browser on Chromium with tabs, bookmarks, private windows and (soon) Chrome extensions",
+  "entry": "digonto_browser.py",
+  "files": [
+    "digonto_browser.py",
+    "digonto_ui.py",
+    "browserkit",
+    "assets",
+    "requirements.txt",
+    "README.txt"
+  ],
+  "requirements": "requirements.txt",
+  "check": "import PySide6.QtWidgets, PySide6.QtWebEngineWidgets, PySide6.QtWebEngineCore",
+  "needs_tk": false,
+  "apt": [
+    "libxcb-cursor0",
+    "libnss3",
+    "libxcomposite1",
+    "libxdamage1",
+    "libxrandr2",
+    "libxtst6",
+    "libxkbfile1",
+    "libasound2t64 | libasound2"
+  ],
+  "macos_min": 13,
+  "categories": "Network;WebBrowser;",
+  "keywords": "browser;web;internet;chromium;tabs;",
+  "wm_class": "digonto-browser",
+  "urls": true,
+  "mime": [
+    "text/html",
+    "application/xhtml+xml",
+    "x-scheme-handler/http",
+    "x-scheme-handler/https"
+  ],
+  "legacy": {
+    "linux": [],
+    "darwin": [],
+    "windows": []
+  },
+  "extensions": [],
+  "uti": []
+}
