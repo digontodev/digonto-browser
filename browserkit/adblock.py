@@ -11,12 +11,11 @@ import os
 import re
 import threading
 import time
-import urllib.request
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWebEngineCore import QWebEngineUrlRequestInfo, QWebEngineUrlRequestInterceptor
 
-from . import store
+from . import net, store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BUNDLED = os.path.join(os.path.dirname(HERE), "assets", "filters")
@@ -287,29 +286,40 @@ class Blocker(QObject):
         if not force and time.time() - self.last_update() < UPDATE_EVERY:
             return False
 
-        def run():
-            ok = 0
-            for name, src in LISTS.items():
-                try:
-                    req = urllib.request.Request(SOURCE + src, headers={"User-Agent": "DigontoBrowser"})
-                    data = urllib.request.urlopen(req, timeout=30).read()
-                    if len(data) > 200 and data.lstrip().startswith(b"!"):
-                        tmp = os.path.join(self.folder, name + ".tmp")
-                        with open(tmp, "wb") as f:
-                            f.write(data)
-                        os.replace(tmp, os.path.join(self.folder, name))
-                        ok += 1
-                except Exception:                          # offline: keep the old lists
-                    pass
-            if ok:
+        state = {"left": len(LISTS), "ok": 0}
+
+        def reload_in_background():
+            def run():
                 e = Engine()
                 e.load(self.folder)
                 self.engine = e
                 self._css = None
-                self.reloaded.emit()
-            if done:
-                done(ok)
-        threading.Thread(target=run, daemon=True).start()
+                self.reloaded.emit()                        # queued to the main thread
+            threading.Thread(target=run, daemon=True).start()
+
+        def got(name, data, err):
+            if data and len(data) > 200 and data.lstrip().startswith(b"!"):
+                try:
+                    tmp = os.path.join(self.folder, name + ".tmp")
+                    with open(tmp, "wb") as f:
+                        f.write(data)
+                    os.replace(tmp, os.path.join(self.folder, name))
+                    state["ok"] += 1
+                except OSError:
+                    pass
+            state["left"] -= 1
+            if state["left"] == 0:
+                if state["ok"]:
+                    reload_in_background()
+                if done:
+                    done(state["ok"])
+        queue = list(LISTS.items())                         # one after the other, through Qt (system certificates)
+
+        def nxt():
+            if queue:
+                name, src = queue.pop(0)
+                net.get(SOURCE + src, lambda d, e, n=name: (got(n, d, e), nxt()), 60000, "DigontoBrowser")
+        nxt()
         return True
 
 

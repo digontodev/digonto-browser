@@ -10,13 +10,11 @@ import os
 import re
 import struct
 import tempfile
-import threading
-import urllib.request
 import zipfile
 
 from PySide6.QtCore import QObject, Signal
 
-from . import store
+from . import net, store
 
 WEBSTORE_ID = re.compile(r"(?:chromewebstore\.google\.com|chrome\.google\.com/webstore)/detail/(?:[^/?#]+/)?([a-p]{32})")
 CRX_URL = ("https://clients2.google.com/service/update2/crx?response=redirect&prodversion={ver}"
@@ -219,22 +217,22 @@ class Extensions(QObject):
         self.busy.add(ext_id)
         self.message.emit(f"Downloading {name or 'the extension'} from the Chrome Web Store …")
 
-        def run():
+        def got(data, err):
+            self.busy.discard(ext_id)
+            if data is None:
+                self.message.emit(f"Could not download {name or ext_id}: {err}")
+                return
             try:
                 tmp = tempfile.mkdtemp(prefix="digonto-ext-")
                 crx = os.path.join(tmp, f"{ext_id}.crx")
-                req = urllib.request.Request(CRX_URL.format(ver=self.ver, id=ext_id),
-                                             headers={"User-Agent": f"Mozilla/5.0 Chrome/{self.ver}"})
-                with urllib.request.urlopen(req, timeout=60) as r, open(crx, "wb") as f:
-                    f.write(r.read())
+                with open(crx, "wb") as f:
+                    f.write(data)
                 z = crx_to_zip(crx, os.path.join(tmp, "extension.zip"))
                 m = check_zip(z)
-                self._install_zip.emit(z, m.get("name", name))
+                self._do_install(z, m.get("name", name))
             except Exception as e:                 # noqa: BLE001
                 self.message.emit(f"Could not install {name or ext_id}: {e}")
-            finally:
-                self.busy.discard(ext_id)
-        threading.Thread(target=run, daemon=True).start()
+        net.get(CRX_URL.format(ver=self.ver, id=ext_id), got, 120000, f"Mozilla/5.0 Chrome/{self.ver}")
         return True
 
     def _do_install(self, zip_path, name):
