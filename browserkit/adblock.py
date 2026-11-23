@@ -298,7 +298,7 @@ class Blocker(QObject):
             threading.Thread(target=run, daemon=True).start()
 
         def got(name, data, err):
-            if data and len(data) > 200 and data.lstrip().startswith(b"!"):
+            if data and len(data) > 200 and not data.lstrip()[:15].lower().startswith((b"<!doctype", b"<html", b"<")):
                 try:
                     tmp = os.path.join(self.folder, name + ".tmp")
                     with open(tmp, "wb") as f:
