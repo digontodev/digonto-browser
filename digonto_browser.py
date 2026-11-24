@@ -2056,10 +2056,40 @@ def _target(a):
     return urls.fix(a, SETTINGS["engine"])
 
 
+def rosetta():
+    """True when this Intel build runs on an Apple chip Mac through Rosetta 2"""
+    if sys.platform != "darwin":
+        return False
+    try:
+        import ctypes
+        import ctypes.util
+        libc = ctypes.CDLL(ctypes.util.find_library("c"))
+        val = ctypes.c_int(0)
+        size = ctypes.c_size_t(ctypes.sizeof(val))
+        if libc.sysctlbyname(b"sysctl.proc_translated", ctypes.byref(val), ctypes.byref(size), None, 0) == 0:
+            return val.value == 1
+    except Exception:                                      # noqa: BLE001
+        pass
+    return False
+
+
+def engine_flags():
+    """Chromium switches set before the engine starts"""
+    flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
+    if rosetta():
+        # hardware video decoding fails through Rosetta 2: sound plays, the picture stays black
+        for f in ("--disable-accelerated-video-decode", "--disable-gpu-memory-buffer-video-frames"):
+            if f not in flags:
+                flags.append(f)
+    if flags:
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
+
+
 def main():
     if "--version" in sys.argv:
         print(VERSION)
         return
+    engine_flags()
     ui.mac_app_name(APP_NAME)
     pages.register_scheme()
     args = [a for a in sys.argv[1:] if not a.startswith("--")]

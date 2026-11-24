@@ -9,7 +9,7 @@ Part of the **Digonto** programs - [digonto.dev](https://digonto.dev). No accoun
 Get the newest version from the **[Releases page](https://github.com/digontodev/digonto-browser/releases/latest)**:
 
 - Windows 10/11: the `.exe` setup
-- macOS 13 or newer: the `.dmg`
+- macOS 13 or newer: `…-macos-apple-chip.dmg` for M1 and newer, `…-macos-intel.dmg` for Intel Macs
 - Ubuntu 24.04+ / Debian 13+: the `.deb`
 
 ## What it does

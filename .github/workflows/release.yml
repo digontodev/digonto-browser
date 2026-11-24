@@ -26,7 +26,8 @@ jobs:
         include:
           - os: ubuntu-24.04      # the Qt libraries need Ubuntu 24.04 / Debian 13 or newer
           - os: windows-latest
-          - os: macos-15-intel    # all Macs: runs natively on Intel, through Rosetta 2 on Apple silicon
+          - os: macos-15-intel    # Intel Macs
+          - os: macos-15          # Apple chip Macs (M1 and newer): a browser engine needs to run natively there
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -57,7 +58,7 @@ jobs:
           for f in dist/*; do
             case "$f" in
               *.exe) mv "$f" "dist/$N-windows.exe" ;;
-              *.dmg) mv "$f" "dist/$N-macos.dmg" ;;
+              *.dmg) if [ "$RUNNER_ARCH" = "ARM64" ]; then mv "$f" "dist/$N-macos-apple-chip.dmg"; else mv "$f" "dist/$N-macos-intel.dmg"; fi ;;
               *.deb) mv "$f" "dist/$N-linux.deb" ;;
             esac
           done
