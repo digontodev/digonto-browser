@@ -287,15 +287,22 @@ def get_profile(private):
     if private:
         prof = QWebEngineProfile(QApplication.instance())            # no name = nothing written to disk
     else:
-        prof = QWebEngineProfile("digonto", QApplication.instance())
+        # Build the profile with its folders already set (Qt 6.9+). Setting the storage path on a finished profile
+        # rebuilds Chromium's settings service, and switching a Chrome extension on then crashes inside Qt.
         base = os.path.join(store.data_dir(), "profile")
-        prof.setPersistentStoragePath(base)
-        prof.setCachePath(os.path.join(base, "cache"))
-        prof.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies)
         try:
-            prof.setPersistentPermissionsPolicy(QWebEngineProfile.PersistentPermissionsPolicy.StoreOnDisk)
-        except AttributeError:
-            pass
+            from PySide6.QtWebEngineCore import QWebEngineProfileBuilder
+            b = QWebEngineProfileBuilder()
+            b.setPersistentStoragePath(base)
+            b.setCachePath(os.path.join(base, "cache"))
+            b.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies)
+            b.setPersistentPermissionsPolicy(QWebEngineProfile.PersistentPermissionsPolicy.StoreOnDisk)
+            prof = b.createProfile("digonto", QApplication.instance())
+        except ImportError:
+            prof = QWebEngineProfile("digonto", QApplication.instance())
+            prof.setPersistentStoragePath(base)
+            prof.setCachePath(os.path.join(base, "cache"))
+            prof.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies)
     prof.setHttpUserAgent(clean_user_agent(prof.httpUserAgent()))
     s = prof.settings()
     for attr in ("FullScreenSupportEnabled", "ScrollAnimatorEnabled", "PdfViewerEnabled", "PluginsEnabled",
@@ -315,6 +322,7 @@ def get_profile(private):
     prof.setUrlRequestInterceptor(ic)
     INTERCEPTORS.append(ic)
     prof._adblock_script = None
+    prof._youtube_script = None
     prof.installUrlSchemeHandler(pages.SCHEME, handler)
     prof._handler = handler
     apply_cookie_policy(prof)
@@ -327,12 +335,21 @@ def get_profile(private):
 def apply_adblock_css(prof):
     """generic element hiding: one style sheet put into every page (not on paused sites, not when switched off)"""
     sc = prof.scripts()
-    old = getattr(prof, "_adblock_script", None)
-    if old is not None:
-        sc.remove(old)
-        prof._adblock_script = None
+    for attr in ("_adblock_script", "_youtube_script"):
+        old = getattr(prof, attr, None)
+        if old is not None:
+            sc.remove(old)
+            setattr(prof, attr, None)
     if not BLOCKER.enabled:
         return
+    yt = QWebEngineScript()                                   # YouTube video ads (see adblock.YOUTUBE_JS)
+    yt.setName("digonto-adblock-youtube")
+    yt.setSourceCode(adblock.youtube_js(SETTINGS.get("adblock_allow", []) or []))
+    yt.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+    yt.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)   # must change the page's own JSON / fetch
+    yt.setRunsOnSubFrames(True)                               # embedded players too
+    sc.insert(yt)
+    prof._youtube_script = yt
     allow = json.dumps(sorted(SETTINGS.get("adblock_allow", []) or []))
     css = json.dumps(BLOCKER.css())
     js = f"""(function(){{
@@ -1145,6 +1162,9 @@ class Main(QMainWindow):
         col.addWidget(self.find)
         outer.addLayout(col, 1)
         self.setCentralWidget(root)
+        self._menu_keys = set()
+        if sys.platform == "darwin":
+            self.build_mac_menu()
         self._toast = QLabel(self)
         self._toast.setStyleSheet(f"background:{INK}; color:white; border-radius:14px; padding:7px 16px; font-size:13px;")
         self._toast.hide()
@@ -1721,9 +1741,174 @@ class Main(QMainWindow):
     def clear_data(self):
         self.open_settings("privacy")
 
+    # ---- the macOS menu bar (File, Edit, View, History, Bookmarks, Window, Help), like Chrome
+    def build_mac_menu(self):
+        mb = self.menuBar()
+        mb.setNativeMenuBar(True)
+
+        def act(menu, text, fn, keys=None, checkable=False, role=None):
+            a = QAction(text, self)
+            if keys:
+                seq = [QKeySequence(k) for k in (keys if isinstance(keys, (list, tuple)) else [keys])]
+                a.setShortcuts(seq)
+                for q in seq:
+                    self._menu_keys.add(q.toString(QKeySequence.PortableText))
+            if checkable:
+                a.setCheckable(True)
+            if role is not None:
+                a.setMenuRole(role)
+            a.triggered.connect(lambda *_: fn())
+            menu.addAction(a)
+            return a
+
+        def edit(action, line_fn):
+            w = QApplication.focusWidget()
+            if isinstance(w, QLineEdit):
+                getattr(w, line_fn)()
+            elif self.view():
+                self.view().triggerPageAction(action)
+        W = QWebEnginePage.WebAction
+        R = QAction.MenuRole
+
+        app_menu = mb.addMenu("Digonto Browser")              # its items move into the app menu on macOS
+        act(app_menu, f"About {APP_NAME}", self.about, role=R.AboutRole)
+        act(app_menu, "Settings …", self.open_settings, "Ctrl+,", role=R.PreferencesRole)
+        act(app_menu, f"Quit {APP_NAME}", QApplication.instance().closeAllWindows, "Ctrl+Q", role=R.QuitRole)
+
+        m = mb.addMenu("File")
+        act(m, "New Tab", lambda: self.add_tab(urls.NEWTAB), "Ctrl+T")
+        act(m, "New Window", self.new_window, "Ctrl+N")
+        act(m, "New Private Window", lambda: self.new_window(private=True), "Ctrl+Shift+N")
+        act(m, "Reopen Closed Tab", self.reopen_tab, "Ctrl+Shift+T")
+        act(m, "Open File …", self.open_file, "Ctrl+O")
+        act(m, "Open Location …", lambda: (self.url.setFocus(), self.url.selectAll()), "Ctrl+L")
+        m.addSeparator()
+        act(m, "Close Window", self.close, "Ctrl+Shift+W")
+        act(m, "Close Tab", lambda: self.close_tab(self.tabs.currentIndex()), "Ctrl+W")
+        act(m, "Save Page as PDF …", self.save_pdf, "Ctrl+S")
+        m.addSeparator()
+        act(m, "Print …", self.print_page, "Ctrl+P")
+
+        m = mb.addMenu("Edit")
+        act(m, "Undo", lambda: edit(W.Undo, "undo"), "Ctrl+Z")
+        act(m, "Redo", lambda: edit(W.Redo, "redo"), "Ctrl+Shift+Z")
+        m.addSeparator()
+        act(m, "Cut", lambda: edit(W.Cut, "cut"), "Ctrl+X")
+        act(m, "Copy", lambda: edit(W.Copy, "copy"), "Ctrl+C")
+        act(m, "Paste", lambda: edit(W.Paste, "paste"), "Ctrl+V")
+        act(m, "Paste and Match Style", lambda: edit(W.PasteAndMatchStyle, "paste"), "Ctrl+Alt+Shift+V")
+        act(m, "Select All", lambda: edit(W.SelectAll, "selectAll"), "Ctrl+A")
+        m.addSeparator()
+        act(m, "Find …", self.find.open_bar, "Ctrl+F")
+        act(m, "Find Next", lambda: self.find.find(), "Ctrl+G")
+        act(m, "Find Previous", lambda: self.find.find(back=True), "Ctrl+Shift+G")
+
+        m = mb.addMenu("View")
+        self.a_bbar = act(m, "Always Show Bookmarks Bar", self.toggle_bbar, "Ctrl+Shift+B", checkable=True)
+        self.a_bbar.setChecked(bool(SETTINGS["show_bookmarks_bar"]))
+        m.addSeparator()
+        act(m, "Stop", lambda: self.view() and self.view().stop(), "Ctrl+.")
+        act(m, "Reload This Page", lambda: self.view() and self.view().reload(), "Ctrl+R")
+        act(m, "Force Reload This Page", lambda: self.view() and self.view().triggerPageAction(W.ReloadAndBypassCache), "Ctrl+Shift+R")
+        m.addSeparator()
+        act(m, "Enter Full Screen", self.toggle_fullscreen, "Meta+Ctrl+F")
+        act(m, "Actual Size", lambda: self.set_zoom(1.0), "Ctrl+0")
+        act(m, "Zoom In", lambda: self.zoom_step(1), ["Ctrl++", "Ctrl+="])
+        act(m, "Zoom Out", lambda: self.zoom_step(-1), "Ctrl+-")
+        m.addSeparator()
+        dev = m.addMenu("Developer")
+        act(dev, "View Source", self.view_source, "Ctrl+Alt+U")
+        act(dev, "Developer Tools", self.dev_tools, "Ctrl+Alt+I")
+
+        self.m_hist = mb.addMenu("History")
+        self.m_hist.aboutToShow.connect(self.fill_history_menu)
+        self.fill_history_menu()
+
+        self.m_bm = mb.addMenu("Bookmarks")
+        self.m_bm.aboutToShow.connect(self.fill_bookmarks_menu)
+        self.fill_bookmarks_menu()
+
+        self.m_win = mb.addMenu("Window")
+        self.m_win.aboutToShow.connect(self.fill_window_menu)
+        self.fill_window_menu()
+
+        m = mb.addMenu("Help")
+        act(m, f"{APP_NAME} Help", lambda: self.add_tab("https://github.com/digontodev/digonto-browser#readme"))
+
+    def _mac_keys(self, *keys):
+        """shortcuts the menu bar already owns (only shown, so they don't clash with the window shortcuts)"""
+        for k in keys:
+            self._menu_keys.add(QKeySequence(k).toString(QKeySequence.PortableText))
+
+    def fill_history_menu(self):
+        m = self.m_hist
+        m.clear()
+        for text, fn, key in (("Home", lambda: self.navigate(urls.NEWTAB), "Ctrl+Shift+H"),
+                              ("Back", lambda: self.view() and self.view().back(), "Ctrl+["),
+                              ("Forward", lambda: self.view() and self.view().forward(), "Ctrl+]")):
+            a = m.addAction(text, fn)
+            a.setShortcut(QKeySequence(key))
+            self._mac_keys(key)
+        m.addSeparator()
+        if not self.private:
+            head = m.addAction("Recently Visited")
+            head.setEnabled(False)
+            for url, title, _ in HISTORY.recent(15):
+                t = title or url
+                m.addAction(t if len(t) <= 60 else t[:58] + "…", lambda u=url: self.open_url(u))
+            m.addSeparator()
+        a = m.addAction("Show Full History", lambda: self.toggle_panel("history"))
+        a.setShortcut(QKeySequence("Ctrl+Y"))
+        self._mac_keys("Ctrl+Y")
+
+    def fill_bookmarks_menu(self):
+        m = self.m_bm
+        m.clear()
+        a = m.addAction("Bookmark This Tab …", self.toggle_bookmark)
+        a.setShortcut(QKeySequence("Ctrl+D"))
+        a = m.addAction("Show All Bookmarks", lambda: self.toggle_panel("bookmarks"))
+        a.setShortcut(QKeySequence("Ctrl+Alt+B"))
+        self._mac_keys("Ctrl+D", "Ctrl+Alt+B")
+        m.addSeparator()
+        for b in sorted(BOOKMARKS.items, key=lambda b: b["title"].lower())[:60]:
+            t = b["title"]
+            m.addAction(t if len(t) <= 60 else t[:58] + "…", lambda u=b["url"]: self.open_url(u))
+
+    def fill_window_menu(self):
+        m = self.m_win
+        m.clear()
+        a = m.addAction("Minimize", self.showMinimized)
+        a.setShortcut(QKeySequence("Ctrl+M"))
+        m.addAction("Zoom", lambda: self.showNormal() if self.isMaximized() else self.showMaximized())
+        m.addSeparator()
+        a = m.addAction("Downloads", lambda: self.toggle_panel("downloads"))
+        a.setShortcut(QKeySequence("Ctrl+Shift+J"))
+        m.addAction("Extensions", lambda: self.open_page("extensions"))
+        self._mac_keys("Ctrl+M", "Ctrl+Shift+J")
+        m.addSeparator()
+        for i in range(self.tabs.count()):
+            t = self.tabs.tabText(i)
+            a = m.addAction(t if len(t) <= 60 else t[:58] + "…", lambda i=i: self.tabs.setCurrentIndex(i))
+            a.setCheckable(True)
+            a.setChecked(i == self.tabs.currentIndex())
+
+    def toggle_bbar(self):
+        SETTINGS["show_bookmarks_bar"] = not SETTINGS["show_bookmarks_bar"]
+        settings_changed()
+        if hasattr(self, "a_bbar"):
+            self.a_bbar.setChecked(bool(SETTINGS["show_bookmarks_bar"]))
+
+    def open_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Open file", os.path.expanduser("~"),
+                                              "Web pages and files (*.html *.htm *.pdf *.svg *.txt *.png *.jpg *.jpeg *.gif *.webp);;All files (*)")
+        if path:
+            self.open_url(QUrl.fromLocalFile(path).toString())
+
     def shortcuts(self):
         def sc(keys, fn):
             for k in (keys if isinstance(keys, (list, tuple)) else [keys]):
+                if QKeySequence(k).toString(QKeySequence.PortableText) in self._menu_keys:
+                    continue                                 # the macOS menu bar already has this one
                 s = QShortcut(QKeySequence(k), self)
                 s.setContext(Qt.WindowShortcut)
                 s.activated.connect(fn)
@@ -1754,7 +1939,7 @@ class Main(QMainWindow):
         sc("F11", self.toggle_fullscreen)
         sc(["F12", "Ctrl+Shift+I"], self.dev_tools)
         sc("Ctrl+U", self.view_source)
-        sc("Ctrl+Shift+B", lambda: (SETTINGS.__setitem__("show_bookmarks_bar", not SETTINGS["show_bookmarks_bar"]), self.fill_bbar()))
+        sc("Ctrl+Shift+B", self.toggle_bbar)
 
     def eventFilter(self, obj, e):
         t = e.type()

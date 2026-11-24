@@ -123,6 +123,10 @@ class Extensions(QObject):
                 pass
             if settings is not None:
                 settings["extensions_broken"] = True
+        elif settings is not None and settings.get("extensions_broken") and not settings.get("extensions_fix_v2"):
+            settings["extensions_broken"] = False       # the old crash came from how the profile was made: fixed in 0.2.2
+        if settings is not None:
+            settings["extensions_fix_v2"] = True
         self.mgr = profile.extensionManager()
         self.ver = chromium_version
         self.busy = set()
@@ -130,6 +134,34 @@ class Extensions(QObject):
         self.mgr.uninstallFinished.connect(lambda info: (self.changed.emit(), self.message.emit(f"Removed {info.name()}")))
         self.mgr.loadFinished.connect(lambda info: self.changed.emit())
         self._install_zip.connect(self._do_install)
+        self.mgr.loadFinished.connect(self._restore)          # Qt loads every extension switched off: switch ours on again
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(1500, self._restore_all)
+
+    def _wanted(self):
+        return set((self.settings.get("enabled_extensions", []) if self.settings is not None else []) or [])
+
+    def _remember(self, ext_id, on):
+        if self.settings is None:
+            return
+        w = self._wanted()
+        (w.add if on else w.discard)(ext_id)
+        self.settings["enabled_extensions"] = sorted(w)
+
+    def _restore(self, info):
+        if info.isInstalled() and info.id() in self._wanted() and not info.isEnabled() and info.isLoaded():
+            from PySide6.QtCore import QTimer
+            ext_id = info.id()
+            QTimer.singleShot(0, lambda: self._enable_id(ext_id))
+
+    def _restore_all(self):
+        for info in self.mgr.extensions():
+            self._restore(info)
+
+    def _enable_id(self, ext_id):
+        fresh = self.find(ext_id)
+        if fresh is not None and not fresh.isEnabled() and self._switch(fresh, True):
+            self.changed.emit()
 
     # ---- list
     def items(self):
@@ -177,9 +209,11 @@ class Extensions(QObject):
     def set_enabled(self, ext_id, on):
         info = self.find(ext_id)
         if info and self._switch(info, on):
+            self._remember(ext_id, on)
             self.changed.emit()
 
     def remove(self, ext_id):
+        self._remember(ext_id, False)
         info = self.find(ext_id)
         if info:
             if info.isInstalled():
@@ -253,6 +287,7 @@ class Extensions(QObject):
                 if not self._switch(fresh, True):
                     self.changed.emit()
                     return
+            self._remember(ext_id, True)
             self.message.emit(f"Installed {name}")
             self.changed.emit()
         QTimer.singleShot(50, enable)

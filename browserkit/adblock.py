@@ -77,6 +77,57 @@ def _pattern(path):
     return re.compile(rx)
 
 
+# YouTube shows its video ads from its own servers, so blocking addresses is not enough. Like uBlock Origin's
+# scriptlets: take the ad data out of the player's data before the player reads it, hide ad boxes, and as a last
+# resort skip an ad that still starts (muted, to its end, press "Skip").
+YOUTUBE_JS = r"""(function () {
+  var h = location.hostname.toLowerCase();
+  if (!/(^|\.)(youtube\.com|youtube-nocookie\.com)$/.test(h)) return;
+  var allow = __ALLOW__;
+  for (var i = 0; i < allow.length; i++) { if (h === allow[i] || h.endsWith('.' + allow[i])) return; }
+  if (window.__digontoYT) return; window.__digontoYT = true;
+  var KEYS = ['adPlacements', 'playerAds', 'adSlots', 'adBreakHeartbeatParams', 'adBreakParams'];
+  function prune(o, depth) {
+    if (!o || typeof o !== 'object' || (depth || 0) > 4) return o;
+    for (var k = 0; k < KEYS.length; k++) { if (KEYS[k] in o) { try { delete o[KEYS[k]]; } catch (e) {} } }
+    if (o.playerResponse) prune(o.playerResponse, (depth || 0) + 1);
+    if (Array.isArray(o)) for (var j = 0; j < o.length && j < 20; j++) prune(o[j], (depth || 0) + 1);
+    return o;
+  }
+  function hasAds(o) { return o && typeof o === 'object' && (o.adPlacements || o.playerAds || o.adSlots || o.playerResponse || Array.isArray(o)); }
+  var P = JSON.parse;
+  JSON.parse = function () { var r = P.apply(this, arguments); try { if (hasAds(r)) prune(r, 0); } catch (e) {} return r; };
+  var J = Response.prototype.json;
+  Response.prototype.json = function () { return J.call(this).then(function (r) { try { if (hasAds(r)) prune(r, 0); } catch (e) {} return r; }); };
+  ['ytInitialPlayerResponse', 'ytInitialData'].forEach(function (name) {
+    var held;
+    try { Object.defineProperty(window, name, { configurable: true, get: function () { return held; },
+                                               set: function (v) { held = prune(v, 0); } }); } catch (e) {}
+  });
+  var css = '#masthead-ad, ytd-ad-slot-renderer, ytd-in-feed-ad-layout-renderer, ytd-banner-promo-renderer, ' +
+    'ytd-promoted-sparkles-web-renderer, ytd-promoted-video-renderer, ytd-display-ad-renderer, ytd-companion-slot-renderer, ' +
+    'ytd-player-legacy-desktop-watch-ads-renderer, #player-ads, .ytp-ad-overlay-container, .ytp-ad-image-overlay, ' +
+    'ytd-rich-item-renderer:has(> #content > ytd-ad-slot-renderer), ytd-merch-shelf-renderer, ytd-statement-banner-renderer, ' +
+    'ytd-search-pyv-renderer, .ytd-mealbar-promo-renderer, #panels > ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-ads"]' +
+    '{display:none!important}';
+  function addCss() { var st = document.createElement('style'); st.textContent = css; (document.head || document.documentElement).appendChild(st); }
+  if (document.documentElement) addCss(); else document.addEventListener('DOMContentLoaded', addCss);
+  setInterval(function () {
+    var player = document.querySelector('.html5-video-player');
+    if (!player || !player.classList.contains('ad-showing')) return;
+    var v = player.querySelector('video');
+    if (v) { v.muted = true; if (isFinite(v.duration) && v.duration > 0) v.currentTime = v.duration; }
+    var skip = document.querySelector('.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-ad-skip-button-container button');
+    if (skip) skip.click();
+  }, 300);
+})();"""
+
+
+def youtube_js(allow_sites):
+    import json as _json
+    return YOUTUBE_JS.replace("__ALLOW__", _json.dumps(sorted(allow_sites)))
+
+
 class Rule:
     __slots__ = ("path", "third", "types", "not_types", "domains", "not_domains")
 
