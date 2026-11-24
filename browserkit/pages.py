@@ -249,11 +249,12 @@ def extensions_html(info):
         return (f'<div class="card">{ic}<div class="body"><h3>{html.escape(e["name"])} <span class="ver">{html.escape(e["version"])}</span></h3>'
                 f'<div class="d">{html.escape(e["description"] or "")}</div><div class="st">{status}'
                 f' · <a href="#" data-remove="{e["id"]}">Remove</a></div></div>{tog}</div>')
-    installed_ids = {e["id"] for e in info["exts"]}
+    installed_ids = {e["id"] for e in info["exts"]} | {e.get("store_id") for e in info["exts"]}
+    installed_names = {e["name"].lower() for e in info["exts"]}
     exts = "".join(ext_card(e) for e in info["exts"]) or '<div class="row"><div class="d">No Chrome extensions yet.</div></div>'
 
     def rec(r):
-        btn = ('<span class="ok">Installed</span>' if r["id"] in installed_ids else
+        btn = ('<span class="ok">Installed</span>' if r["id"] in installed_ids or r["name"].lower() in installed_names else
                f'<button data-rec="{r["id"]}" data-name="{html.escape(r["name"])}">Install</button>')
         tested = ' <span class="badge">tested</span>' if r.get("tested") else ""
         return f'<div class="row"><div><div class="t">{html.escape(r["name"])}{tested}</div><div class="d">{html.escape(r["what"])}</div></div>{btn}</div>'

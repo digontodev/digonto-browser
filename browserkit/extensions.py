@@ -39,6 +39,74 @@ def webstore_id(text):
     return t if re.fullmatch(r"[a-p]{32}", t) else None
 
 
+def _varint(b, i):
+    n = shift = 0
+    while True:
+        c = b[i]
+        i += 1
+        n |= (c & 0x7F) << shift
+        shift += 7
+        if c < 0x80:
+            return n, i
+
+
+def _fields(b):
+    """a tiny protobuf reader: yields (field number, bytes) for the length-delimited fields"""
+    i = 0
+    while i < len(b):
+        key, i = _varint(b, i)
+        num, kind = key >> 3, key & 7
+        if kind == 2:
+            ln, i = _varint(b, i)
+            yield num, b[i:i + ln]
+            i += ln
+        elif kind == 0:
+            _, i = _varint(b, i)
+        elif kind == 5:
+            i += 4
+        elif kind == 1:
+            i += 8
+        else:
+            return
+
+
+def id_from_key(pub):
+    """Chrome's extension ID: the first 16 bytes of SHA-256 of the public key, written with the letters a-p"""
+    import hashlib
+    return "".join(chr(ord("a") + int(c, 16)) for c in hashlib.sha256(pub).hexdigest()[:32])
+
+
+def crx_public_key(data, want_id=None):
+    """the extension's own public key from a .crx (v3: protobuf header; v2: plain) - it fixes the extension's ID"""
+    if data[:4] != b"Cr24":
+        return None
+    ver = struct.unpack("<I", data[4:8])[0]
+    if ver == 2:
+        pk = struct.unpack("<I", data[8:12])[0]
+        return data[16:16 + pk]
+    hlen = struct.unpack("<I", data[8:12])[0]
+    header = data[12:12 + hlen]
+    keys = [k for num, proof in _fields(header) if num in (2, 3) for n2, k in _fields(proof) if n2 == 1]
+    for k in keys:
+        if want_id is None or id_from_key(k) == want_id:
+            return k
+    return keys[0] if keys and want_id is None else None
+
+
+def add_key(zip_path, pub):
+    """put "key" into manifest.json, so Chromium gives the extension its real Web Store ID"""
+    tmp = zip_path + ".tmp"
+    with zipfile.ZipFile(zip_path) as zin, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "manifest.json":
+                m = json.loads(data.decode("utf-8-sig"))
+                m.setdefault("key", base64.b64encode(pub).decode())
+                data = json.dumps(m, ensure_ascii=False, indent=1).encode("utf-8")
+            zout.writestr(item, data)
+    os.replace(tmp, zip_path)
+
+
 def crx_to_zip(crx_path, zip_path):
     """a .crx is a zip with a signed header in front; drop the header"""
     with open(crx_path, "rb") as f:
@@ -60,6 +128,15 @@ def crx_to_zip(crx_path, zip_path):
     with open(zip_path, "wb") as f:
         f.write(body)
     zipfile.ZipFile(zip_path).testzip()
+    try:
+        pub = crx_public_key(data)
+        if pub:
+            with zipfile.ZipFile(zip_path) as z:
+                has_key = "key" in json.loads(z.read("manifest.json").decode("utf-8-sig"))
+            if not has_key:
+                add_key(zip_path, pub)
+    except Exception:                                   # noqa: BLE001 - without the key it still installs
+        pass
     return zip_path
 
 
@@ -105,6 +182,17 @@ def icon_uri(folder, manifest, want=48):
         return ""
     mime = "image/svg+xml" if p.endswith(".svg") else "image/png"
     return f"data:{mime};base64," + base64.b64encode(data).decode()
+
+
+def webstore_id_of(manifest):
+    """the Web Store ID an installed extension belongs to (from its key), if any"""
+    k = manifest.get("key")
+    if not k:
+        return ""
+    try:
+        return id_from_key(base64.b64decode(k))
+    except ValueError:
+        return ""
 
 
 class Extensions(QObject):
@@ -155,8 +243,28 @@ class Extensions(QObject):
             QTimer.singleShot(0, lambda: self._enable_id(ext_id))
 
     def _restore_all(self):
+        self.remove_duplicates()
         for info in self.mgr.extensions():
             self._restore(info)
+
+    def remove_duplicates(self):
+        """earlier versions could install the same extension more than once (no fixed ID): keep one of each"""
+        groups = {}
+        for info in self.mgr.extensions():
+            if info.isInstalled():
+                m = manifest_of(info.path()) if info.path() else {}
+                groups.setdefault((info.name(), m.get("version", "")), []).append(info)
+        wanted = self._wanted()
+        removed = 0
+        for infos in groups.values():
+            if len(infos) < 2:
+                continue
+            infos.sort(key=lambda i: (not i.isEnabled(), i.id() not in wanted))      # keep the one that is on
+            for extra in infos[1:]:
+                self._remember(extra.id(), False)
+                self.mgr.uninstallExtension(extra)
+                removed += 1
+        return removed
 
     def _enable_id(self, ext_id):
         fresh = self.find(ext_id)
@@ -171,7 +279,7 @@ class Extensions(QObject):
                 continue
             path = info.path()
             m = manifest_of(path) if path else {}
-            out.append({"id": info.id(), "name": info.name() or m.get("name", "?"), "description": info.description(),
+            out.append({"id": info.id(), "store_id": webstore_id_of(m), "name": info.name() or m.get("name", "?"), "description": info.description(),
                         "enabled": info.isEnabled(), "loaded": info.isLoaded(), "installed": info.isInstalled(),
                         "error": info.error(), "popup": info.actionPopupUrl().toString(), "version": m.get("version", ""),
                         "icon": icon_uri(path, m) if path else "", "path": path})
@@ -236,6 +344,13 @@ class Extensions(QObject):
             tmp = tempfile.mkdtemp(prefix="digonto-ext-")
             z = crx_to_zip(path, os.path.join(tmp, "extension.zip"))
             m = check_zip(z)
+            if m.get("key"):
+                try:
+                    if self.find(id_from_key(base64.b64decode(m["key"]))):
+                        self.message.emit(f"{m.get('name', 'This extension')} is already installed")
+                        return
+                except ValueError:
+                    pass
             self.message.emit(f"Installing {m.get('name', 'extension')} …")
             self.mgr.installExtension(z)
         except Exception as e:                     # noqa: BLE001 - shown to the user
@@ -246,6 +361,9 @@ class Extensions(QObject):
         if not ext_id:
             self.message.emit("That is not a Chrome Web Store link (it should contain /detail/…)")
             return False
+        if self.find(ext_id):
+            self.message.emit(f"{name or 'This extension'} is already installed")
+            return True
         if ext_id in self.busy:
             return True
         self.busy.add(ext_id)
@@ -263,6 +381,10 @@ class Extensions(QObject):
                     f.write(data)
                 z = crx_to_zip(crx, os.path.join(tmp, "extension.zip"))
                 m = check_zip(z)
+                if self.find(ext_id):
+                    self.message.emit(f"{m.get('name', name)} is already installed")
+                    self.changed.emit()
+                    return
                 self._do_install(z, m.get("name", name))
             except Exception as e:                 # noqa: BLE001
                 self.message.emit(f"Could not install {name or ext_id}: {e}")
