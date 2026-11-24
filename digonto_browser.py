@@ -2076,8 +2076,9 @@ def rosetta():
 def engine_flags():
     """Chromium switches set before the engine starts"""
     flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
-    if rosetta():
-        # hardware video decoding fails through Rosetta 2: sound plays, the picture stays black
+    if sys.platform == "darwin":
+        # on macOS Qt's hardware video path shows a black picture (sound plays) - on Apple chip and through Rosetta 2.
+        # Tested on an M3: these two switches bring the picture back; the rest of the page stays GPU-accelerated.
         for f in ("--disable-accelerated-video-decode", "--disable-gpu-memory-buffer-video-frames"):
             if f not in flags:
                 flags.append(f)
